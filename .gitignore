@@ -1,0 +1,55 @@
+# 密钥与个人数据
+.env
+memory.json
+emotion_log.json
+voice_profiles/
+*_base.wav
+eureka_chroma_db/
+
+# 模型 (体积大，单独下载)
+models/
+
+# 运行时产生的临时文件
+__pycache__/
+*.pyc
+*.mp3
+input.wav
+current_screen.jpg
+screenshot.jpg
+wechat_reply_temp.jpg
+wxauto_logs/
+@AutomationLog.txt
+.Rhistory
+
+# 打包产物
+build/
+dist/
+
+# 无控制台启动时的运行日志
+eureka.log
+
+
+# 记忆 (个人数据)
+chat_history.json
+eureka_memory_db/
+companion_state.json
+tasks.json
+activity_log.json
+eureka_life.json
+eureka_relationship.json
+character.json
+
+# 用户自己放的 Live2D 模型 (版权归原作者，不随程序发布)
+live2d_resources/*
+!live2d_resources/README.md
+
+# 本机设置、用量、轮换出的旧日志
+settings.json
+usage.json
+eureka.log.*
+
+# 每个人自己的软件路径 (示例见 apps.example.json)
+apps.json
+
+# 自己的图标 (比如角色头像，有版权的不要提交)
+assets/icon_custom.ico

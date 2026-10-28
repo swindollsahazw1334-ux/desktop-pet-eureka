@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+        canvas { display: block; width: 100%; height: 100%; }
+    </style>
+    
+    <script src="js/pixi.min.js"></script>
+    <script>window.PIXI = PIXI;</script>
+    <script src="js/live2dcubismcore.min.js"></script>
+    <script src="js/cubism4.min.js"></script>
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        let model = null;
+
+        // 👇 1. 专属通讯接口：直接对接 Live2D 引擎的视觉神经大脑
+        window.updateFocus = function(x, y) {
+            // 我们不再暴力修改参数，而是把全屏坐标直接交给引擎自带的追踪控制器
+            if (model && model.internalModel && model.internalModel.focusController) {
+                model.internalModel.focusController.focus(x, y);
+            }
+        };
+
+        // ==========================================
+        // 2. ⚙️ 表情优先级配置
+        // ==========================================
+        // 模型路径和待机表情由程序通过网址参数传进来 (character.json 里配置)
+        const PARAMS = new URLSearchParams(location.search);
+        const MODEL_URL = PARAMS.get("model");
+        const IDLE_EXPRESSION = PARAMS.get("idle") || "";
+        const DEFAULT_DURATION = 3000; 
+
+        const PRIORITY_MAP = {
+            "6i gi a ri": 38,
+            "4OAO":       30,
+            "8punch":     28,
+            "5QAQ":       24,
+            "1desk":      20,
+            "2mic":       18,
+            "7keyboard":  16,
+            "9":          10,
+            "3clever":    0  
+        };
+
+        let currentExpression = null;
+        let currentPriorityKey = null;
+        let expressionExpireTime = 0;  
+
+        // ==========================================
+        // 3. 口型控制变量
+        // ==========================================
+        let isTalking = false;     
+        let mouthTarget = 0;       
+        let mouthCurrent = 0;      
+        const lerp = (start, end, amt) => (1 - amt) * start + amt * end;
+        // 嘴型跟着语音的音量包络走 (Python 端算好整段的包络发过来)
+        let lipEnvelope = null;
+        let lipFrameMs = 50;
+        let lipStart = 0;
+
+        window.playLipSync = function(envelope, frameMs) {
+            lipEnvelope = envelope;
+            lipFrameMs = frameMs || 50;
+            lipStart = performance.now();
+            isTalking = true;
+        }
+
+        window.stopTalking = function() {
+            isTalking = false;
+            lipEnvelope = null;
+            mouthTarget = 0;
+        }
+
+        // ==========================================
+        // 4. 表情请求接口
+        // ==========================================
+        function hasExpression(name) {
+            const manager = model?.internalModel?.motionManager?.expressionManager;
+            const defs = manager?.definitions || [];
+            return !!name && defs.some(d => (d.Name || d.name) === name);
+        }
+
+        // expName：模型里的表情名；priorityKey：程序内部的表情代号 (用来比优先级)
+        window.setExpression = function(expName, duration = null, priorityKey = null) {
+            if (!hasExpression(expName)) return;  // 换了模型、这个表情不存在就跳过
+            if (!model?.internalModel?.motionManager?.expressionManager) return;
+            const now = Date.now();
+            const newPriority = PRIORITY_MAP[priorityKey || expName] || 0; 
+            let currentPriority = (currentExpression && now < expressionExpireTime) ? (PRIORITY_MAP[currentPriorityKey || currentExpression] || 0) : -1;
+
+            if (newPriority < currentPriority) return;
+
+            try {
+                const realDuration = duration || DEFAULT_DURATION;
+                currentExpression = expName;
+                currentPriorityKey = priorityKey;
+                expressionExpireTime = now + realDuration;
+                model.internalModel.motionManager.expressionManager.setExpression(expName);
+            } catch (e) { console.error(e); }
+        }
+
+        window.resetExpression = function() {
+            currentExpression = null; 
+            expressionExpireTime = 0; 
+            if (hasExpression(IDLE_EXPRESSION)) {
+                model.internalModel.motionManager.expressionManager.setExpression(IDLE_EXPRESSION);
+            }
+        }
+    
+        // ==========================================
+        // 5. 初始化与渲染循环
+        // ==========================================
+        const app = new PIXI.Application({
+            view: document.getElementById('canvas'),
+            autoStart: true, resizeTo: window, transparent: true, backgroundAlpha: 0,
+            antialias: true, resolution: window.devicePixelRatio || 1, autoDensity: true
+        });
+
+        async function loadModel() {
+            if (!MODEL_URL) {
+                if(window.pyBridge) window.pyBridge.log_to_py("NO_MODEL");
+                return;
+            }
+            try {
+                model = await PIXI.live2d.Live2DModel.from(MODEL_URL);
+                app.stage.addChild(model);
+                
+                // 👇 [核心修复] 彻底关闭网页自带的鼠标追踪，不让它跟 Python 打架！
+                model.interactive = false;
+                model.autoInteract = false; 
+
+                // 待机动作：模型有 Idle 分组就用它；没有就用模型里的第一个动作分组循环播放
+                try {
+                    const manager = model.internalModel.motionManager;
+                    const groups = Object.keys(manager.definitions || {});
+                    const idle = groups.find(g => g.toLowerCase() === "idle") ?? groups[0];
+                    if (idle !== undefined) {
+                        manager.groups.idle = idle;
+                        model.motion(idle, 0);
+                    }
+                } catch (e) { console.error(e); }
+
+                window.onresize = resizeModel; 
+                resizeModel();
+                
+                setTimeout(() => { window.resetExpression(); }, 500);
+
+                // 🔥🔥🔥 [每一帧的循环逻辑] 🔥🔥🔥
+                app.ticker.add(() => {
+                    if (!model || !model.internalModel || !model.internalModel.coreModel) return;
+                    const core = model.internalModel.coreModel;
+
+                    // A. 状态机自动归位
+                    if (currentExpression !== null && Date.now() > expressionExpireTime) {
+                        currentExpression = null; 
+                        if (hasExpression(IDLE_EXPRESSION)) {
+                            model.internalModel.motionManager.expressionManager.setExpression(IDLE_EXPRESSION);
+                        }
+                    }
+
+                    // B. 口型控制：按播放进度取包络里的音量
+                    if (isTalking && lipEnvelope) {
+                        const idx = Math.floor((performance.now() - lipStart) / lipFrameMs);
+                        if (idx < lipEnvelope.length) {
+                            mouthTarget = lipEnvelope[idx];
+                        } else {
+                            window.stopTalking();
+                        }
+                    }
+                    mouthCurrent = lerp(mouthCurrent, isTalking ? mouthTarget : 0, 0.4);
+                    if (mouthCurrent < 0.01) mouthCurrent = 0;
+                    core.setParameterValueById('ParamMouthOpenY', mouthCurrent);
+                    core.setParameterValueById('ParamMouthOpen', mouthCurrent);
+                }, null, PIXI.UPDATE_PRIORITY.LOW);
+
+                if(window.pyBridge) window.pyBridge.log_to_py("✅ 模型加载成功！");
+            } catch (e) {
+                if(window.pyBridge) window.pyBridge.log_to_py("❌ 加载报错: " + e);
+            }
+        }
+
+        function resizeModel() {
+            if (!model) return;
+            const windowW = window.innerWidth; 
+            const windowH = window.innerHeight;
+            let targetScale = (windowH * 0.9) / (model.height / model.scale.y);
+            if ((model.width / model.scale.x) * targetScale > windowW) {
+                targetScale = (windowW * 0.9) / (model.width / model.scale.x);
+            }
+            model.scale.set(targetScale);
+            model.x = (windowW - model.width) / 2;
+            model.y = (windowH - model.height) / 2 + (windowH * 0.1);
+        }
+
+        new QWebChannel(qt.webChannelTransport, function (channel) {
+            window.pyBridge = channel.objects.pyBridge;
+            loadModel();
+        });
+    </script>
+</body>
+</html>
