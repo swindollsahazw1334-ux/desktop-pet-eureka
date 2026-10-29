@@ -10,6 +10,7 @@
                  要选实时和非实时模型都有的音色 (Tina / Momo / Roya 等)，Cici 只有实时模型有
     OMNI_URL     默认 wss://dashscope.aliyuncs.com/api-ws/v1/realtime
                  (连不上就换成 wss://你的工作空间ID.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime)
+    OMNI_IDLE_SECONDS  她说完后等你接话的时间 (默认 12 秒)，超时就结束实时对话
     Key 和脑子共用 VOLC_API_KEY (可用 OMNI_API_KEY 单独指定)
 """
 import base64
@@ -18,8 +19,10 @@ import os
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
+import wave
 
 import numpy as np
 import pyaudio
@@ -44,6 +47,13 @@ def _env(name, default=None):
     return default if not value or value.startswith("#") else value
 
 
+def _env_float(name, default):
+    try:
+        return float(_env(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
 OMNI_MODEL = _env("OMNI_MODEL", "qwen3.8-omni-flash-realtime")
 OMNI_VOICE = _env("OMNI_VOICE", "Tina")
 OMNI_URL = _env("OMNI_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
@@ -53,7 +63,10 @@ IN_RATE = 16000           # 麦克风采样率 (Omni 要求 16kHz 单声道 PCM)
 OUT_RATE = 24000          # Omni 回来的语音
 CHUNK = 1600              # 每次发 0.1 秒
 LIPSYNC_FRAME_MS = 50
-IDLE_SECONDS = 5          # 她说完后这么久没人接话就结束会话，回到待机
+CONNECT_TIMEOUT = _env_float("OMNI_CONNECT_TIMEOUT", 15)  # 连实时服务的超时 (秒)
+CONNECT_ATTEMPTS = 2       # 超时就再试一次，网络抖动时不至于直接放弃
+IDLE_SECONDS = _env_float("OMNI_IDLE_SECONDS", 12)  # 她说完后这么久没人接话就结束会话
+RESPONSE_TIMEOUT = 60      # 一次回复最多等这么久，服务端卡住时别让界面一直“正在思考”
 
 # 回复里出现这些词就换对应表情 (Omni 直接说话，没法再让它写 [表情:xx] 标签)
 _EXPRESSION_WORDS = [
@@ -121,17 +134,25 @@ def connect():
     urls = [u for u in dict.fromkeys([_working_url, OMNI_URL, LEGACY_URL]) if u]
     reasons = []
     for url in urls:
-        try:
-            ws = websocket.create_connection(f"{url}?model={OMNI_MODEL}",
-                                             header=[f"Authorization: Bearer {OMNI_API_KEY}"], timeout=10)
-            if url != OMNI_URL:
-                print(f"   ℹ️ OMNI_URL 连不上，改用 {url} 连上了")
-            _working_url = url
-            return ws
-        except websocket.WebSocketBadStatusException as e:
-            reasons.append(f"{url} → {_describe_bad_status(e)}")
-        except Exception as e:
-            reasons.append(f"{url} → {e}")
+        for attempt in range(1, CONNECT_ATTEMPTS + 1):
+            try:
+                ws = websocket.create_connection(f"{url}?model={OMNI_MODEL}",
+                                                 header=[f"Authorization: Bearer {OMNI_API_KEY}"],
+                                                 timeout=CONNECT_TIMEOUT)
+                if url != OMNI_URL:
+                    print(f"   ℹ️ OMNI_URL 连不上，改用 {url} 连上了")
+                _working_url = url
+                return ws
+            except websocket.WebSocketBadStatusException as e:
+                # 认证/地址不对，重试也没用
+                reasons.append(f"{url} → {_describe_bad_status(e)}")
+                break
+            except Exception as e:
+                if attempt == CONNECT_ATTEMPTS:
+                    reasons.append(f"{url} → {e}")
+                else:
+                    print(f"   ⚠️ 实时语音连接超时，1.5 秒后重试 ({attempt}/{CONNECT_ATTEMPTS})")
+                    time.sleep(1.5)
     raise OmniUnavailable("连接被拒绝：\n      " + "\n      ".join(reasons))
 
 
@@ -163,6 +184,82 @@ def check():
         print(f"❌ 建立会话时出错: {e}")
     finally:
         ws.close()
+
+
+def synthesize(text, instructions=None, timeout=45):
+    """
+    用实时模型把一段文字说/唱出来 (给手机 QQ 的语音条用)，返回 wav 路径；失败返回 None。
+
+    和 tts.py 的朗读不同：文字是喂给实时模型的输入，音频由模型直接生成，
+    所以停顿、情绪更像电脑前聊天；内容本身是歌词时，也可以带旋律唱出来。
+    """
+    text = (text or "").strip()
+    if not text or not OMNI_API_KEY:
+        return None
+    ws = None
+    try:
+        ws = connect()
+        ws.settimeout(30)
+        first = json.loads(ws.recv())
+        if first.get("type") == "error":
+            print(f"   ⚠️ 实时合成被拒绝: {first}")
+            return None
+        instruction = instructions or (
+            f"你是{character.name()}，一个元气满满的少女。现在要把下面这段话用语音说给TA听："
+            "语气自然、有情绪，像真的在说话；不要改内容，不要加开场白或解释。"
+            "如果这段话本身是歌词，就带着旋律唱出来。")
+        ws.send(json.dumps({"type": "session.update", "session": {
+            "modalities": ["text", "audio"],
+            "voice": OMNI_VOICE,
+            "instructions": instruction,
+            "audio": {"input": {"format": {"type": "pcm", "sample_rate": IN_RATE}},
+                      "output": {"format": {"type": "pcm", "sample_rate": OUT_RATE}, "voice": OMNI_VOICE}},
+            "turn_detection": None,
+        }}))
+        ws.send(json.dumps({"type": "conversation.item.create", "item": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text",
+                         "text": f"请用你的声音、带情绪地把下面这句话原样说出来，不要回答它、不要加开场白：\n「{text}」"}],
+        }}))
+        ws.send(json.dumps({"type": "response.create"}))
+
+        pcm = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                event = json.loads(ws.recv())
+            except Exception as e:
+                print(f"   ⚠️ 实时合成中断: {e}")
+                break
+            kind = event.get("type", "")
+            if kind == "response.audio.delta":
+                pcm += base64.b64decode(event.get("delta", ""))
+            elif kind == "error":
+                print(f"   ⚠️ 实时合成出错: {event.get('error')}")
+                return None
+            elif kind == "response.done":
+                break
+        if not pcm:
+            return None
+
+        fd, path = tempfile.mkstemp(prefix="qq_voice_", suffix=".wav")
+        os.close(fd)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(OUT_RATE)
+            wf.writeframes(bytes(pcm))
+        usage.add("omni_seconds", max(1, int(len(pcm) / 2 / OUT_RATE)))
+        return path
+    except Exception as e:
+        print(f"   ⚠️ 实时合成失败: {e}")
+        return None
+    finally:
+        try:
+            if ws:
+                ws.close()
+        except Exception:
+            pass
 
 
 class _Player:
@@ -249,6 +346,7 @@ class OmniSession:
         self.last_activity = time.time()
         self.user_speaking = False
         self.responding = False
+        self.responding_since = 0.0
         self._pending_calls = []
         self._user_text = ""
         self._reply_text = ""
@@ -309,6 +407,10 @@ class OmniSession:
                 pcm = mic.read(CHUNK, exception_on_overflow=False)
                 if self.should_stop():
                     print("   ⏹️ 实时对话被要求结束")
+                    break
+
+                if self.responding and self.responding_since and time.time() - self.responding_since > RESPONSE_TIMEOUT:
+                    print("   ⚠️ 实时回复超时，结束这次会话")
                     break
 
                 busy = self.responding or self.player.playing or self.user_speaking or self._pending_calls
@@ -385,6 +487,12 @@ class OmniSession:
             if not self._ready.is_set():
                 self._error = msg
                 self._ready.set()
+            else:
+                # 会话中途出错 (比如模型服务端 500)：直接结束这次会话，
+                # 不然 responding 一直为 True，界面会卡在“正在思考”
+                self._error = msg
+                self.responding = False
+                self.close()
 
         elif kind == "input_audio_buffer.speech_started":
             self.user_speaking = True
@@ -406,6 +514,7 @@ class OmniSession:
 
         elif kind == "response.created":
             self.responding = True
+            self.responding_since = time.time()
 
         elif kind == "response.audio.delta":
             if self.player:
@@ -434,6 +543,7 @@ class OmniSession:
 
         elif kind == "response.done":
             self.responding = False
+            self.responding_since = 0.0
             self.last_activity = time.time()
             if self._pending_calls:
                 calls, self._pending_calls = self._pending_calls, []

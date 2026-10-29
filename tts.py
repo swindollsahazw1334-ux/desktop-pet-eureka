@@ -40,7 +40,7 @@ SPEAK_RATE = 24000  # Omni 输出 24kHz 16bit 单声道 PCM
 FRAME_MS = 50  # 嘴型包络的帧长
 
 # 表情 -> 说话语气，大模型挑的表情顺带决定她怎么说
-BASE_INSTRUCTION = "你是一个元气满满、阳光开朗的少女主播，说话轻快爱笑，自然口语化。"
+BASE_INSTRUCTION = "你是一个元气满满、阳光开朗的少女主播，说话轻快爱笑，自然口语化；语速从容一点，别像赶时间，标点只当停顿，不要念出符号的名字。"
 MOOD_INSTRUCTIONS = {
     None: "用开朗明快、带着笑意的语气说。",
     "3clever": "用开心得意、笑嘻嘻的语气说。",
@@ -71,9 +71,33 @@ _file_counter = itertools.count()
 
 # (伸了个懒腰) 这类动作描写、[表情:xx] 标签只给气泡看，不念出来
 _UNSPOKEN = re.compile(r"[（(][^（()）]*[)）]|\[[^\]]*\]")
+# markdown 符号只该给眼睛看，念出来会变成"星号""井号"
+_MARKDOWN = re.compile(r"[*_`#>|]+")
 # 句末标点，用来把流式文本切成一句一句
-_SENTENCE_END = re.compile(r"[。！？!?~…；;\n]+")
+_SENTENCE_END = re.compile(r"[。！？!?…；;\n]+")
 _MIN_SENTENCE_LEN = 8  # 太短的句子先攒着，避免一个字一个字地合成
+
+
+def _speakable(text):
+    """
+    把一段回复整理成适合朗读的文字：去掉动作描写、表情标签、markdown 和横杠。
+
+    模型有时会输出 "- 第一点" 或 "——"，直接念会变成"横杠"，很出戏。
+    日期/范围里的横杠换成空格，负号保留 (温度 -5 度不会被念反)。
+    """
+    dashes = r"\-–—－‐‑‒―−"
+    text = _UNSPOKEN.sub("", text or "")
+    text = re.sub(rf"(?<=[0-9A-Za-z])[{dashes}]+(?=[0-9A-Za-z])", " ", text)  # GPT-4 / 3-5 之间的
+    text = re.sub(rf"[—–－‐‑‒―−]+", "，", text)                       # 破折号当停顿，别念成符号
+    text = re.sub(r"(?<![0-9A-Za-z])-+(?![0-9A-Za-z])", " ", text)   # 当标点用的 ASCII 横杠
+    text = re.sub(r"[~～]+", "，", text)                             # 波浪号当停顿，别念出来
+    text = re.sub(r"…+", "，", text)                                # 省略号也当停顿
+    text = _MARKDOWN.sub("", text)
+    for word in ("横杠", "破折号", "波浪号", "下划线", "省略号"):
+        text = text.replace(word, "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return text.strip("，,、 \t\n")
 
 
 def ensure_mixer():
@@ -98,10 +122,10 @@ _client = None
 _speak_disabled = False  # Key/模型/音色配错时，本次运行只冒气泡，不再反复尝试
 
 
-def _synth(text):
+def _synth(text, respect_stop=True):
     """把一句话念成语音，返回音频文件路径；没东西可念或失败返回 None (只冒气泡)"""
     global _client, _speak_disabled
-    spoken = _UNSPOKEN.sub("", text).strip()
+    spoken = _speakable(text)
     if not spoken or _speak_disabled or not SPEAK_API_KEY:
         return None
     print(f"   [TTS] 正在合成语音: {spoken[:10]}...")
@@ -114,8 +138,10 @@ def _synth(text):
         stream = _client.chat.completions.create(
             model=SPEAK_MODEL,
             messages=[
-                {"role": "system", "content": f"{BASE_INSTRUCTION}你现在只负责朗读：把用户发来的那段话原样念出来，"
-                                              f"一个字都不要改，不要回答、不要补充、不要加开场白。{mood}"},
+                {"role": "system", "content": f"{BASE_INSTRUCTION}你现在只负责朗读下面这段话：内容不要改，"
+                                              f"不要回答、不要补充、不要加开场白。标点和符号只当停顿，"
+                                              f"绝对不要念出符号本身。{mood}"
+                                              f"不管什么情绪，语速都从容一点，句尾留一点停顿，不要着急。"},
                 {"role": "user", "content": spoken},
             ],
             modalities=["text", "audio"],
@@ -125,7 +151,7 @@ def _synth(text):
         )
         pcm = bytearray()
         for chunk in stream:
-            if _stop_event.is_set():
+            if respect_stop and _stop_event.is_set():
                 return None
             if not chunk.choices:
                 continue
@@ -214,6 +240,21 @@ def speak(text):
             events.say(text)
     except Exception as e:
         print(f"❌ 说话模块出错: {e}")
+
+
+def synthesize(text):
+    """
+    只合成不播放：给手机 QQ 发语音条用，返回 wav 文件路径 (用完记得删)，失败返回 None。
+
+    这里不看 _stop_event：桌面上按了"闭嘴"不代表 QQ 上的消息也不能回语音。
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        return _synth(text, respect_stop=False)
+    except Exception as e:
+        print(f"❌ 语音合成出错: {e}")
+        return None
 
 
 class SpeechStream:

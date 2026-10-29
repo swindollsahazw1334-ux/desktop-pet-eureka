@@ -1,14 +1,15 @@
 # Python 3.11 (Windows)
-# 安装：pip install -r requirements.txt
+# Install: pip install -r requirements.txt
+# (Chinese mirrors: add `-i https://pypi.tuna.tsinghua.edu.cn/simple`)
 
-# 界面 / 桌宠
+# UI / desktop pet
 PySide6==6.10.2
 
-# 大脑 (OpenAI 兼容接口，配置写在 .env)
+# Brain (OpenAI-compatible API, configured in .env)
 openai==2.16.0
 python-dotenv==1.2.1
 
-# 听：唤醒词、录音、语音识别、声纹
+# Hearing: wake word, recording, speech recognition, voiceprint
 sherpa-onnx==1.12.28
 onnxruntime==1.23.2
 PyAudio==0.2.14
@@ -19,17 +20,17 @@ torchaudio==2.10.0
 soundfile==0.13.1
 huggingface_hub==1.5.0
 
-# 实时语音对话 (千问 Omni)
+# Realtime voice chat (Qwen Omni)
 websocket-client==1.9.0
 
-# 说：语音合成与播放
+# Speaking: TTS and playback
 pygame-ce==2.5.7
 numpy==2.4.2
 
-# 记忆
+# Memory
 chromadb==1.5.2
 
-# 技能：音量、截图、联网搜索
+# Skills: volume, screenshot, web search
 pycaw==20181226
 comtypes==1.4.15
 pywin32==311

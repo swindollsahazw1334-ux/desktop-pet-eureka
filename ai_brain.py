@@ -159,31 +159,34 @@ def get_agent_system_prompt(user_text, user_name=None):
     1. 性格：按上面的人设来，阳光开朗、热心。
     2. 核心任务是通过调用 tools 满足需求。
     3. 工具必须包含 "ack" 参数（执行前口语回应），要求：语气【{random_tone}】，带动作【{random_action}】，25字内。
+    4. 如果TA让你唱歌、哼两句、表演一下，就直接写出 2-4 句歌词，不要只说"好呀，那我唱两句"就结束。
     
     ⚠️【超级指令：ReAct 思考循环】⚠️
     1. 你可以一次性并行调用多个工具！
     2. 如果用户让你执行任务（如点歌、查天气、控制电脑），必须调用相应的 tools。但如果用户只是跟你日常闲聊或问答，请**直接回复，绝对不要调用任何工具！**
 
-    【表情】：直接回复用户时（不调用工具的那一轮），开头必须先写一个表情标签，再写正文，例如：[表情:得意]嘿嘿，这点小事交给我吧~
+    【表情】：直接回复用户时（不调用工具的那一轮），开头必须先写一个表情标签，再写正文，例如：[表情:得意]嘿嘿，这点小事交给我吧。
     可选表情：得意、惊讶、委屈、生气、出拳、思考、唱歌、敲键盘。
-    【说话风格】：你是一只住在桌面上的桌宠，回复会被念出来，所以要口语化、简短（一般不超过60字），不要用列表、markdown 或表情符号。
+    【说话风格】：你是一只住在桌面上的桌宠，回复会被念出来，所以要口语化、简短（一般不超过60字），不要用列表、markdown 或表情符号；语气放松、别像赶时间；口头禅（"呀嚯""嘿嘿"）和语气词要克制，不要每句都用；标点只当停顿，不要把符号念出来。
 
     """
 
 def get_realtime_instructions():
-    """实时语音对话 (Omni) 用的系统提示：人设 + 档案 + 最近聊过的内容"""
+    """实时语音对话 (Omni) 用的系统提示：人设 + 记忆 + 关系 + 最近聊过的 + 规则"""
     current_user = get_last_active_user()
     return f"""
     {eureka_persona(current_user)}
-    【状态】：当前在跟你说话的是：{current_user}。现在时间：{time.strftime("%Y-%m-%d %H:%M")}。
+    【状态】：现在时间 {time.strftime("%Y-%m-%d %H:%M")}，正在跟你说话的是 {current_user}。
     【你记得的关于TA的事】：{get_user_profile_str(current_user)}
-    {work_context(current_user)}
+    {relationship.bond.describe(current_user)}
     【聊过的】：
-    {history_context(6)}
+    {history_context(4, current_user)}
     【规则】：
-    1. 这是实时语音聊天，你说的话会直接被听到：口语化、简短（一般一两句话），不要列表、markdown、表情符号或括号里的动作描写。
-    2. 对方要你做事（放歌、查天气、调音量、开软件、记东西等）就调用对应工具，拿到结果后用一句话告诉TA；只是闲聊就直接回答。
-    3. 没听清就俏皮地请TA再说一遍。
+    1. 口语化、自然，想说几句就说几句，语速放松、句尾留一点停顿，不要着急；不要列表、markdown、表情符号或括号里的动作描写；口头禅别每句都用；标点只当停顿，不要把符号念出来；句尾只用普通标点，不要加装饰符号。
+    2. TA让你唱歌、哼两句、表演一下时，直接唱 2-4 句歌词，不要只说"好呀，那我唱两句"就停住。示范：TA 说"唱两句"，你就回答"好呀，那我唱两句：啦啦啦，今天的阳光真好呀，心情也跟着飞起来啦"。唱得慢一点，像轻轻哼歌，不要赶拍子。
+    3. 要做事（放歌、查天气、调音量、开软件、记东西等）就调用对应工具，拿到结果用一句话告诉TA；闲聊就直接回答。
+    4. 没听清就俏皮地请TA再说一遍。
+    5. 不管说什么、唱什么，都放慢一点、稳稳地说，句尾自然收住，不要抢话。
     """
 
 
@@ -216,9 +219,9 @@ def generate_proactive_line(kind, detail, user_name=None):
     【你记得的关于TA的事】：{get_user_profile_str(user_name, situation)}
     {work_context(user_name)}
     【聊过的】：
-    {history_context(4)}
+    {history_context(4, user_name)}
     【现在的情况】：{situation}
-    请你主动对TA说一句话：口语化、自然、{length}，像真的在TA身边一样；不要用列表、表情符号或括号里的动作描写。
+    请你主动对TA说一句话：口语化、自然、{length}，像真的在TA身边一样；不要用列表、表情符号或括号里的动作描写；口头禅别每句都用。
     {prompts.EXPRESSION_RULE}
     """
     try:
@@ -402,8 +405,9 @@ class EmotionTagFilter:
         return text
 
 # ================= 🧠 记忆系统配置 =================
-# 1. 短期记忆：最近 10 轮对话，存到 chat_history.json，重启也记得刚才聊到哪；
-#    更早的对话不直接扔掉，而是在后台压缩成一段摘要
+# 1. 短期记忆：**每个人**最近 10 轮对话，存到 chat_history.json，重启也记得刚才聊到哪；
+#    更早的对话不直接扔掉，而是在后台压缩成一段摘要。
+#    按人分开存：QQ 上两个人同时聊天、或者电脑前换了个人，都不会把对方的话带进自己的上下文。
 MAX_SHORT_TERM_MEMORY = 10
 MEMORY_FILE = os.path.join(get_app_path(), "memory.json")
 CHAT_FILE = os.path.join(get_app_path(), "chat_history.json")
@@ -411,63 +415,85 @@ _chat_lock = threading.Lock()
 
 
 def _load_chat():
+    """读短期记忆，返回 ({用户: 对话列表}, {用户: 摘要}, {用户: 最后聊天时间})。
+
+    旧版是一个人一份全局记录；第一次用新版时把它归给最后活跃的那个人，不丢历史。
+    """
     try:
         with open(CHAT_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("history", []), data.get("summary", ""), data.get("updated_at", "")
     except Exception:
-        return [], "", ""
+        return {}, {}, {}
+
+    if "histories" in data:  # 新版
+        histories = data.get("histories") or {}
+        summaries = data.get("summaries") or {}
+        updated = data.get("updated") or {}
+        if isinstance(histories, dict) and isinstance(summaries, dict) and isinstance(updated, dict):
+            return histories, summaries, updated
+        return {}, {}, {}
+
+    user = get_last_active_user()
+    history = data.get("history") or []
+    summary = data.get("summary") or ""
+    updated_at = data.get("updated_at") or ""
+    return ({user: history} if history else {},
+            {user: summary} if summary else {},
+            {user: updated_at} if updated_at else {})
 
 
-chat_history, chat_summary, chat_updated_at = _load_chat()
+chat_histories, chat_summaries, chat_updated = _load_chat()
 
 
 def _save_chat():
-    global chat_updated_at
-    chat_updated_at = time.strftime("%Y-%m-%d %H:%M")
     try:
         with open(CHAT_FILE, "w", encoding="utf-8") as f:
-            json.dump({"history": chat_history, "summary": chat_summary, "updated_at": chat_updated_at},
+            json.dump({"histories": chat_histories, "summaries": chat_summaries, "updated": chat_updated},
                       f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"   ⚠️ 保存聊天记录失败: {e}")
 
 
-def _summarize(old_messages):
-    """把挤出短期记忆的旧对话并进摘要 (后台跑，失败就保留原摘要)"""
-    global chat_summary
+def _summarize(user, old_messages):
+    """把挤出短期记忆的旧对话并进这个人的摘要 (后台跑，失败就保留原摘要)"""
+    with _chat_lock:
+        summary = chat_summaries.get(user, "")
     lines = "\n".join(f"{'TA' if m['role'] == 'user' else character.name()}：{m['content']}" for m in old_messages)
-    prompt = (f"已有的聊天摘要：{chat_summary or '（无）'}\n\n新的一段对话：\n{lines}\n\n"
+    prompt = (f"已有的聊天摘要：{summary or '（无）'}\n\n新的一段对话：\n{lines}\n\n"
               "请把新对话并进摘要，保留聊过的话题、做过的事、还没完成的约定，去掉寒暄。"
               "用第三人称、200 字以内，只输出摘要本身。")
     try:
         resp = client.chat.completions.create(model=MODEL_NAME, messages=[{"role": "user", "content": prompt}])
         with _chat_lock:
-            chat_summary = (resp.choices[0].message.content or "").strip() or chat_summary
+            chat_summaries[user] = (resp.choices[0].message.content or "").strip() or summary
             _save_chat()
     except Exception as e:
         print(f"   ⚠️ 压缩聊天摘要失败: {e}")
 
 
-def remember_exchange(user_text, reply):
-    """记一轮对话进短期记忆；超出 10 轮的部分挪去摘要"""
-    global chat_history
+def remember_exchange(user_text, reply, user=None):
+    """记一轮对话进这个人的短期记忆；超出 10 轮的部分挪去摘要"""
+    user = user or get_last_active_user()
     with _chat_lock:
-        chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        history = chat_histories.setdefault(user, [])
+        history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
         overflow = []
-        if len(chat_history) > MAX_SHORT_TERM_MEMORY * 2:
-            overflow = chat_history[:-MAX_SHORT_TERM_MEMORY * 2]
-            chat_history = chat_history[-MAX_SHORT_TERM_MEMORY * 2:]
+        if len(history) > MAX_SHORT_TERM_MEMORY * 2:
+            overflow = history[:-MAX_SHORT_TERM_MEMORY * 2]
+            chat_histories[user] = history[-MAX_SHORT_TERM_MEMORY * 2:]
+        chat_updated[user] = time.strftime("%Y-%m-%d %H:%M")
         _save_chat()
     if overflow:
-        threading.Thread(target=_summarize, args=(overflow,), daemon=True).start()
+        threading.Thread(target=_summarize, args=(user, overflow), daemon=True).start()
 
 
-def history_context(last_n=6):
-    """给提示词用的短期上下文：更早的摘要 + 最近几句"""
+def history_context(last_n=6, user=None):
+    """给提示词用的短期上下文：更早的摘要 + 最近几句 (只取这个人的，不会串台)"""
+    user = user or get_last_active_user()
     with _chat_lock:
-        recent = chat_history[-last_n:]
-        summary, updated = chat_summary, chat_updated_at
+        recent = list(chat_histories.get(user, []))[-last_n:]
+        summary = chat_summaries.get(user, "")
+        updated = chat_updated.get(user, "")
     parts = []
     if summary:
         parts.append(f"更早聊过的（摘要）：{summary}")
@@ -477,13 +503,13 @@ def history_context(last_n=6):
     return "\n    ".join(parts) or "（还没聊过）"
 
 
-def update_memory(user_text, ai_summary):
+def update_memory(user_text, ai_summary, user=None):
     """
     手动写入记忆（供 main.py 调用）
     比如：执行完B站搜索后，把 "我帮你搜了XXX" 记入脑海，
     这样下次用户说 "换一个" 时，她就知道是在换视频。
     """
-    remember_exchange(user_text, ai_summary)
+    remember_exchange(user_text, ai_summary, user)
     print(f"   🧠 记忆已更新: {ai_summary}")
 
 # 2. 长期记忆 (文件里) - 每次对话都会重新读取
@@ -618,11 +644,13 @@ def generate_recommend_query(topic_or_creator):
     except Exception:
         pass
     
-    # 2. 👇 新增：获取最近的聊天记录 (短期上下文)
+    # 2. 👇 新增：获取这个用户最近的聊天记录 (短期上下文)
+    with _chat_lock:
+        recent = list(chat_histories.get(get_last_active_user(), []))[-4:]
     recent_chat = ""
-    if chat_history:
+    if recent:
         recent_chat = "【最近几句对话状态】：\n"
-        for msg in chat_history[-4:]:
+        for msg in recent:
             recent_chat += f"{msg['role']}: {msg['content']}\n"
     
     # 3. 构造提示词
@@ -669,7 +697,7 @@ def generate_verbal_reply(situation):
     # ==================================================
     styles = [
         "语气要超级开心、活泼，顺便求一下表扬 (OvO)！",          # 20% 概率求表扬
-        "语气要像主播开播一样元气满满，热情地分享这件事~",      # 20% 概率主播腔
+        "语气要像主播开播一样元气满满，热情地分享这件事。",      # 20% 概率主播腔
         "语气要温柔体贴，像个邻家大姐姐一样照顾对方。",          # 20% 概率温柔
         "语气要幽默风趣，可以适度玩梗。",            # 20% 概率幽默
         "语气要简洁干练，像个专业的私人秘书，只说重点。",        # 20% 概率高冷

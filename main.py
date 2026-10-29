@@ -413,9 +413,9 @@ def run_eureka():
 _ctx = threading.local()  # 当前线程在替谁处理 (QQ 上的消息不一定是电脑前的人)
 REMOTE_TOOLS = {"tasks", "remember", "note", "weather", "search_chat"}
 REMOTE_SCENE = """
-    【现在的场景】：TA不在电脑前，正在手机 QQ 上给你发消息。像发消息一样回复：口语、简短（一般一到三句），
-    可以带一两个颜文字。这时只能用任务清单、记住信息、备忘、查天气、联网搜索这几个工具；
-    放歌、开软件、看屏幕这类电脑上的事，就告诉TA回到电脑前再叫你。
+    【现在的场景】：TA 在用聊天软件给你发消息。像发消息一样回复：口语、简短（一般一到三句），
+    可以带一两个颜文字。你手头只有任务清单、记住信息、备忘、查天气、联网搜索这些工具；
+    放歌、开软件、看屏幕这类电脑上的事，等TA回到电脑前再做。
 """
 
 
@@ -430,7 +430,7 @@ def reply_remote(user_name, text):
         tools = [t for t in ai_brain.get_eureka_tools() if t["function"]["name"] in REMOTE_TOOLS]
         messages = [
             {"role": "system", "content": ai_brain.get_agent_system_prompt(text, user_name) + REMOTE_SCENE},
-            {"role": "user", "content": f"【近期对话上下文】:\n{ai_brain.history_context(4)}\n\n当前用户最新消息（来自手机 QQ）: {text}"},
+            {"role": "user", "content": f"【近期对话上下文】:\n{ai_brain.history_context(4, user_name)}\n\n当前用户最新消息（来自手机 QQ）: {text}"},
         ]
         reply, notes = "", []
         for _ in range(4):
@@ -454,9 +454,9 @@ def reply_remote(user_name, text):
         m = ai_brain._EMOTION_TAG.match(reply)
         if m:
             reply = reply[m.end():]
-        reply = reply.strip() or "嗯嗯，我在呢~"
+        reply = reply.strip() or "嗯嗯，我在呢。"
 
-        ai_brain.update_memory(f"（QQ）{text}", " ".join(notes + [reply]))
+        ai_brain.update_memory(f"（QQ）{text}", " ".join(notes + [reply]), user_name)
         note_interaction("chat", user_name)
         memory_store.add_turn_async(user_name, text, reply)
         return reply
@@ -480,7 +480,7 @@ def deliver_proactive(item, settings):
         line = line[m.end():].strip()
     print(f"<<< 💬 主动开口 ({item['kind']}): {line}")
     tts.speak(line)
-    ai_brain.remember_exchange(f"（{character.name()}主动开口）", line)
+    ai_brain.remember_exchange(f"（{character.name()}主动开口）", line, user)
     if is_stop():
         return
     if settings.get("voice_mode", "omni") == "omni" and not OMNI_DISABLED:
@@ -494,7 +494,7 @@ def run_omni_session(settings, opening=None):
 
     def on_turn(user_text, reply):
         # 已经在后台线程里了：记进短期对话，再整理进长期记忆
-        ai_brain.update_memory(user_text, reply)
+        ai_brain.update_memory(user_text, reply, current_user)
         note_interaction("chat", current_user)
         memory_store.store.add_turn(current_user, user_text, reply)
 
@@ -550,6 +550,7 @@ def handle_user_text(user_text):
         if user["name"] in user_text:
             ai_brain.set_last_active_user(user["name"])
             break
+    current_user = ai_brain.get_last_active_user()  # 名字切换过档案的话，短期记忆也跟着这个人走
     if is_stop(): return
 
     print("\n>>> 🧠 Agent 启动 ReAct 思考引擎...")
@@ -557,7 +558,7 @@ def handle_user_text(user_text):
     system_prompt = ai_brain.get_agent_system_prompt(user_text)
 
     # 拼装短期历史对话 (更早的摘要 + 最近几句)
-    history_str = f"【近期对话上下文】:\n{ai_brain.history_context(4)}\n"
+    history_str = f"【近期对话上下文】:\n{ai_brain.history_context(4, current_user)}\n"
 
     messages_thread = [
         {"role": "system", "content": system_prompt},
@@ -621,11 +622,11 @@ def handle_user_text(user_text):
             final_summary.append(f"AI最终回复：{spoken}")
 
         if final_summary:
-            ai_brain.update_memory(user_text, " | ".join(final_summary))
+            ai_brain.update_memory(user_text, " | ".join(final_summary), current_user)
 
         note_interaction("chat")
         # 后台整理长期记忆：提炼事实，和旧记忆比对后增/改/删
-        memory_store.add_turn_async(ai_brain.get_last_active_user(), user_text, spoken or " | ".join(final_summary))
+        memory_store.add_turn_async(current_user, user_text, spoken or " | ".join(final_summary))
         break
 
 
@@ -635,7 +636,7 @@ def run_tool(action, intent):
 
     if action == "music":
         keyword = intent.get("keyword", "")
-        say_ack(action, intent, '准备为你播放音乐~')
+        say_ack(action, intent, '准备为你播放音乐。')
         skills.play_music(keyword)
         executed_summary = f"已开始播放音乐：{keyword if keyword else '默认歌单'}"
 
@@ -760,7 +761,7 @@ def run_tool(action, intent):
         user = current_user()
         board = tasks.board
         task_action = intent.get("action", "list")
-        say_ack(action, intent, '好嘞~')
+        say_ack(action, intent, '好嘞。')
         if task_action == "add":
             added = board.add(user, intent.get("items") or [])
             done, total = board.progress(user)
@@ -792,7 +793,7 @@ def run_tool(action, intent):
     elif action == "volume":
         vol_type = intent.get("type", "set")
         value = intent.get("value", 50)
-        say_ack(action, intent, '音量调好啦~')
+        say_ack(action, intent, '音量调好啦。')
         if skills.control_system_volume(vol_type, value):
             executed_summary = f"音量调节成功（{vol_type} {value if vol_type == 'set' else ''}）"
         else:

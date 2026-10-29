@@ -53,3 +53,7 @@ apps.json
 
 # 自己的图标 (比如角色头像，有版权的不要提交)
 assets/icon_custom.ico
+
+# 手动备份目录和朗读合成的临时文件
+backup_*/
+reply_*.wav

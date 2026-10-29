@@ -1,6 +1,7 @@
 import pyaudio
 import numpy as np
 import os
+import time
 import sys
 import sherpa_onnx
 import character
@@ -124,6 +125,11 @@ def wait_for_wake_word(check_interrupt=None, sensitivity=0.5):
     if not ensure_model():
         print(f"❌ 找不到唤醒模型: {MODEL_DIR}")
         return False
+    if not MODEL_DIR.isascii():
+        # sherpa-onnx 在 Windows 上读不了带中文的路径，会报 "No graph was found in the protobuf"
+        import notify
+        notify.notice("程序放在了带中文的文件夹里，唤醒模型读不了…把整个文件夹挪到全英文路径 (比如 D:\\EurekaPet) 就好啦。"
+                      "现在可以双击我来说话", key="kws_ascii")
 
     audio = None
     mic_stream = None
@@ -157,6 +163,11 @@ def wait_for_wake_word(check_interrupt=None, sensitivity=0.5):
     except Exception as e:
         import notify
         notify.report(e, "唤醒词 / 麦克风")
+        # 模型或麦克风坏了，主循环会马上重试：先歇几秒，免得刷屏占 CPU (期间仍能被打断)
+        for _ in range(50):
+            if check_interrupt and check_interrupt():
+                return True
+            time.sleep(0.1)
         return False
 
     finally:
